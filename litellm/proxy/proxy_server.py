@@ -283,7 +283,6 @@ except Exception as e:
         pass
 
 server_root_path = os.getenv("SERVER_ROOT_PATH", "")
-print("server root path: ", server_root_path)  # noqa
 _license_check = LicenseCheck()
 premium_user: bool = _license_check.is_premium()
 ui_link = f"{server_root_path}/ui/"
@@ -3007,7 +3006,10 @@ async def chat_completion(
         elif (
             llm_router is not None
             and data["model"] not in router_model_names
-            and llm_router.default_deployment is not None
+            and (
+                llm_router.default_deployment is not None
+                or len(llm_router.provider_default_deployments) > 0
+            )
         ):  # model in router deployments, calling a specific deployment on the router
             tasks.append(llm_router.acompletion(**data))
         elif user_model is not None:  # `litellm --model <your-model-name>`
@@ -3275,7 +3277,10 @@ async def completion(
         elif (
             llm_router is not None
             and data["model"] not in router_model_names
-            and llm_router.default_deployment is not None
+            and (
+                llm_router.default_deployment is not None
+                or len(llm_router.provider_default_deployments) > 0
+            )
         ):  # model in router deployments, calling a specific deployment on the router
             llm_response = asyncio.create_task(llm_router.atext_completion(**data))
         elif user_model is not None:  # `litellm --model <your-model-name>`
@@ -3541,7 +3546,10 @@ async def embeddings(
         elif (
             llm_router is not None
             and data["model"] not in router_model_names
-            and llm_router.default_deployment is not None
+            and (
+                llm_router.default_deployment is not None
+                or len(llm_router.provider_default_deployments) > 0
+            )
         ):  # model in router deployments, calling a specific deployment on the router
             tasks.append(llm_router.aembedding(**data))
         elif user_model is not None:  # `litellm --model <your-model-name>`
@@ -3708,7 +3716,10 @@ async def image_generation(
         elif (
             llm_router is not None
             and data["model"] not in router_model_names
-            and llm_router.default_deployment is not None
+            and (
+                llm_router.default_deployment is not None
+                or len(llm_router.provider_default_deployments) > 0
+            )
         ):  # model in router deployments, calling a specific deployment on the router
             response = await llm_router.aimage_generation(**data)
         elif user_model is not None:  # `litellm --model <your-model-name>`
@@ -3850,7 +3861,10 @@ async def audio_speech(
         elif (
             llm_router is not None
             and data["model"] not in router_model_names
-            and llm_router.default_deployment is not None
+            and (
+                llm_router.default_deployment is not None
+                or len(llm_router.provider_default_deployments) > 0
+            )
         ):  # model in router deployments, calling a specific deployment on the router
             response = await llm_router.aspeech(**data)
         elif user_model is not None:  # `litellm --model <your-model-name>`
@@ -4020,7 +4034,10 @@ async def audio_transcriptions(
             elif (
                 llm_router is not None
                 and data["model"] not in router_model_names
-                and llm_router.default_deployment is not None
+                and (
+                    llm_router.default_deployment is not None
+                    or len(llm_router.provider_default_deployments) > 0
+                )
             ):  # model in router deployments, calling a specific deployment on the router
                 response = await llm_router.atranscription(**data)
             elif user_model is not None:  # `litellm --model <your-model-name>`
@@ -5270,7 +5287,10 @@ async def moderations(
         elif (
             llm_router is not None
             and data.get("model") not in router_model_names
-            and llm_router.default_deployment is not None
+            and (
+                llm_router.default_deployment is not None
+                or len(llm_router.provider_default_deployments) > 0
+            )
         ):  # model in router deployments, calling a specific deployment on the router
             response = await llm_router.amoderation(**data)
         elif user_model is not None:  # `litellm --model <your-model-name>`
@@ -5353,7 +5373,13 @@ async def anthropic_response(
     litellm.adapters = [{"id": "anthropic", "adapter": anthropic_adapter}]
 
     global user_temperature, user_request_timeout, user_max_tokens, user_api_base
-    data: dict = {**anthropic_data, "adapter_id": "anthropic"}
+    body = await request.body()
+    body_str = body.decode()
+    try:
+        request_data: dict = ast.literal_eval(body_str)
+    except Exception:
+        request_data = json.loads(body_str)
+    data: dict = {**request_data, "adapter_id": "anthropic"}
     try:
         data["model"] = (
             general_settings.get("completion_model", None)  # server default
@@ -5421,7 +5447,10 @@ async def anthropic_response(
         elif (
             llm_router is not None
             and data["model"] not in router_model_names
-            and llm_router.default_deployment is not None
+            and (
+                llm_router.default_deployment is not None
+                or len(llm_router.provider_default_deployments) > 0
+            )
         ):  # model in router deployments, calling a specific deployment on the router
             llm_response = asyncio.create_task(llm_router.aadapter_completion(**data))
         elif user_model is not None:  # `litellm --model <your-model-name>`
@@ -8599,8 +8628,13 @@ async def auth_callback(request: Request):
         _last_name = getattr(result, "last_name", "") or ""
         user_id = _first_name + _last_name
 
+    if user_email is not None and (user_id is None or len(user_id) == 0):
+        user_id = user_email
+
     user_info = None
     user_id_models: List = []
+    max_internal_user_budget = litellm.max_internal_user_budget
+    internal_user_budget_duration = litellm.internal_user_budget_duration
 
     # User might not be already created on first generation of key
     # But if it is, we want their models preferences
@@ -8612,10 +8646,13 @@ async def auth_callback(request: Request):
         "spend": 0,
         "team_id": "litellm-dashboard",
     }
-    user_defined_values = {
+    user_defined_values: SSOUserDefinedValues = {
         "models": user_id_models,
         "user_id": user_id,
         "user_email": user_email,
+        "max_budget": max_internal_user_budget,
+        "user_role": None,
+        "budget_duration": internal_user_budget_duration,
     }
     _user_id_from_sso = user_id
     try:
@@ -8627,10 +8664,16 @@ async def auth_callback(request: Request):
             )
             if user_info is not None:
                 user_defined_values = {
-                    "models": getattr(user_info, "models", []),
+                    "models": getattr(user_info, "models", user_id_models),
                     "user_id": getattr(user_info, "user_id", user_id),
                     "user_email": getattr(user_info, "user_id", user_email),
                     "user_role": getattr(user_info, "user_role", None),
+                    "max_budget": getattr(
+                        user_info, "max_budget", max_internal_user_budget
+                    ),
+                    "budget_duration": getattr(
+                        user_info, "budget_duration", internal_user_budget_duration
+                    ),
                 }
                 user_role = getattr(user_info, "user_role", None)
 
@@ -8644,6 +8687,12 @@ async def auth_callback(request: Request):
                     "user_id": user_id,
                     "user_email": getattr(user_info, "user_id", user_email),
                     "user_role": getattr(user_info, "user_role", None),
+                    "max_budget": getattr(
+                        user_info, "max_budget", max_internal_user_budget
+                    ),
+                    "budget_duration": getattr(
+                        user_info, "budget_duration", internal_user_budget_duration
+                    ),
                 }
                 user_role = getattr(user_info, "user_role", None)
 
@@ -8660,9 +8709,37 @@ async def auth_callback(request: Request):
                     "user_email": litellm.default_user_params.get(
                         "user_email", user_email
                     ),
+                    "user_role": litellm.default_user_params.get("user_role", None),
+                    "max_budget": litellm.default_user_params.get(
+                        "max_budget", max_internal_user_budget
+                    ),
+                    "budget_duration": litellm.default_user_params.get(
+                        "budget_duration", internal_user_budget_duration
+                    ),
                 }
+
     except Exception as e:
         pass
+
+    is_internal_user = False
+    if (
+        user_defined_values["user_role"] is not None
+        and user_defined_values["user_role"] == LitellmUserRoles.INTERNAL_USER.value
+    ):
+        is_internal_user = True
+    if (
+        is_internal_user is True
+        and user_defined_values["max_budget"] is None
+        and litellm.max_internal_user_budget is not None
+    ):
+        user_defined_values["max_budget"] = litellm.max_internal_user_budget
+
+    if (
+        is_internal_user is True
+        and user_defined_values["budget_duration"] is None
+        and litellm.internal_user_budget_duration is not None
+    ):
+        user_defined_values["budget_duration"] = litellm.internal_user_budget_duration
 
     verbose_proxy_logger.info(
         f"user_defined_values for creating ui key: {user_defined_values}"

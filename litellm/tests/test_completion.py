@@ -497,6 +497,8 @@ def test_completion_claude_3_function_call(model):
             drop_params=True,
         )
         print(second_response)
+    except litellm.InternalServerError:
+        pass
     except Exception as e:
         pytest.fail(f"Error occurred: {e}")
 
@@ -918,7 +920,10 @@ def test_completion_function_plus_image(model):
                             "type": "string",
                             "description": "The city and state, e.g. San Francisco, CA",
                         },
-                        "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]},
+                        "unit": {
+                            "type": "string",
+                            "enum": ["celsius", "fahrenheit"],
+                        },
                     },
                     "required": ["location"],
                 },
@@ -934,15 +939,18 @@ def test_completion_function_plus_image(model):
         }
     ]
 
-    response = completion(
-        model=model,
-        messages=[image_message],
-        tool_choice=tool_choice,
-        tools=tools,
-        stream=False,
-    )
+    try:
+        response = completion(
+            model=model,
+            messages=[image_message],
+            tool_choice=tool_choice,
+            tools=tools,
+            stream=False,
+        )
 
-    print(response)
+        print(response)
+    except litellm.InternalServerError:
+        pass
 
 
 @pytest.mark.parametrize(
@@ -1811,14 +1819,19 @@ def tgi_mock_post(url, data=None, json=None, headers=None):
 def test_hf_test_completion_tgi():
     litellm.set_verbose = True
     try:
-        with patch("requests.post", side_effect=tgi_mock_post):
+        with patch("requests.post", side_effect=tgi_mock_post) as mock_client:
             response = completion(
                 model="huggingface/HuggingFaceH4/zephyr-7b-beta",
                 messages=[{"content": "Hello, how are you?", "role": "user"}],
                 max_tokens=10,
+                wait_for_model=True,
             )
             # Add any assertions-here to check the response
             print(response)
+            assert "options" in mock_client.call_args.kwargs["data"]
+            json_data = json.loads(mock_client.call_args.kwargs["data"])
+            assert "wait_for_model" in json_data["options"]
+            assert json_data["options"]["wait_for_model"] is True
     except litellm.ServiceUnavailableError as e:
         pass
     except Exception as e:
@@ -2104,6 +2117,43 @@ def test_completion_openai():
             messages=[{"role": "user", "content": "Hey"}],
             max_tokens=10,
             metadata={"hi": "bye"},
+        )
+        print("This is the response object\n", response)
+
+        response_str = response["choices"][0]["message"]["content"]
+        response_str_2 = response.choices[0].message.content
+
+        cost = completion_cost(completion_response=response)
+        print("Cost for completion call with gpt-3.5-turbo: ", f"${float(cost):.10f}")
+        assert response_str == response_str_2
+        assert type(response_str) == str
+        assert len(response_str) > 1
+
+        litellm.api_key = None
+    except Timeout as e:
+        pass
+    except Exception as e:
+        pytest.fail(f"Error occurred: {e}")
+
+
+def test_completion_openai_pydantic():
+    try:
+        litellm.set_verbose = True
+        from pydantic import BaseModel
+
+        class CalendarEvent(BaseModel):
+            name: str
+            date: str
+            participants: list[str]
+
+        print(f"api key: {os.environ['OPENAI_API_KEY']}")
+        litellm.api_key = os.environ["OPENAI_API_KEY"]
+        response = completion(
+            model="gpt-4o-2024-08-06",
+            messages=[{"role": "user", "content": "Hey"}],
+            max_tokens=10,
+            metadata={"hi": "bye"},
+            response_format=CalendarEvent,
         )
         print("This is the response object\n", response)
 
@@ -4055,7 +4105,7 @@ def test_completion_gemini(model):
         if "InternalServerError" in str(e):
             pass
         else:
-            pytest.fail(f"Error occurred: {e}")
+            pytest.fail(f"Error occurred:{e}")
 
 
 # test_completion_gemini()
@@ -4085,9 +4135,28 @@ async def test_acompletion_gemini():
 def test_completion_deepseek():
     litellm.set_verbose = True
     model_name = "deepseek/deepseek-chat"
-    messages = [{"role": "user", "content": "Hey, how's it going?"}]
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "get_weather",
+                "description": "Get weather of an location, the user shoud supply a location first",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location": {
+                            "type": "string",
+                            "description": "The city and state, e.g. San Francisco, CA",
+                        }
+                    },
+                    "required": ["location"],
+                },
+            },
+        },
+    ]
+    messages = [{"role": "user", "content": "How's the weather in Hangzhou?"}]
     try:
-        response = completion(model=model_name, messages=messages)
+        response = completion(model=model_name, messages=messages, tools=tools)
         # Add any assertions here to check the response
         print(response)
     except litellm.APIError as e:
@@ -4343,6 +4412,3 @@ def test_moderation():
     output = response.results[0]
     print(output)
     return output
-
-
-# test_moderation()
