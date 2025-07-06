@@ -1,6 +1,7 @@
-from typing import Any, Dict, List, Literal, Optional, Required, TypedDict
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
+from typing_extensions import Required, TypedDict
 
 from ..base import GuardrailConfigModel
 from .base import AzureContentSafetyConfigModel
@@ -79,3 +80,7 @@ class AzureContentSafetyTextModerationConfigModel(
     optional_params: AzureTextModerationOptionalParams = Field(
         description="Optional parameters for the Azure Content Safety Text Moderation guardrail",
     )
+
+    @staticmethod
+    def ui_friendly_name() -> str:
+        return "Azure Content Safety Text Moderation"
